@@ -1,5 +1,6 @@
 ﻿// Workers/TelegramBotWorker.cs
 using Microsoft.AspNetCore.Mvc;
+using MultiMessengerAiBot.Data;
 using MultiMessengerAiBot.Services;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -22,17 +23,21 @@ public class TelegramBotWorker : BackgroundService
     private readonly string _hostUrl;
     private static readonly ConcurrentDictionary<long, string> UserPhotoContext = new(); // Хранит последнее фото пользователя (chatId → fileId)
     private readonly string _token;
+    private readonly string _walletNumber;
+    private readonly AppDbContext _db;
 
     // Защита от спама: максимум 1 запрос каждые 8 секунд на пользователя
     private readonly Dictionary<long, DateTime> _lastRequest = new();
 
-    public TelegramBotWorker(IConfiguration cfg, IBotService imageService, ILogger<TelegramBotWorker> logger)
+    public TelegramBotWorker(IConfiguration cfg, IBotService imageService, ILogger<TelegramBotWorker> logger, AppDbContext db)
     {
         _token = cfg["BotTokens:Telegram"] ?? throw new InvalidOperationException("Telegram token missing");
         _bot = new TelegramBotClient(_token);
         _imageService = imageService;
         _logger = logger;
         _hostUrl = cfg["HostUrl"]!.TrimEnd('/');
+        _walletNumber = cfg["YooMoney:WalletNumber"] ?? throw new InvalidOperationException("Missing wallet");
+        _db = db;
     }
 
     protected override async Task ExecuteAsync(CancellationToken ct)
@@ -44,10 +49,7 @@ public class TelegramBotWorker : BackgroundService
             var info = await _bot.GetWebhookInfo(ct);
             if (info.Url != webhookUrl)
             {
-                await _bot.SetWebhook(
-                    url: webhookUrl,
-                    allowedUpdates: new[] { UpdateType.Message },
-                    cancellationToken: ct);
+                await _bot.SetWebhook(url: webhookUrl, allowedUpdates: new[] { UpdateType.Message }, cancellationToken: ct);
 
                 _logger.LogInformation("Webhook установлен: {Url}", webhookUrl);
             }
@@ -78,7 +80,18 @@ public class TelegramBotWorker : BackgroundService
             {
                 var chatId = update.Message.Chat.Id;
 
-                // === 1. ПОЛЬЗОВАТЕЛЬ ОТПРАВИЛ ФОТО ===
+                // === 1. ПОЛУЧЕНИЕ КОНТАКТА (для локализации) ===
+                if (message.Contact is { } contact)
+                {
+                    var user = await GetOrCreateUser(chatId);
+                    user.PhoneNumber = contact.PhoneNumber;
+                    user.Currency = contact.PhoneNumber.StartsWith("+998") ? "UZS" : "RUB";
+                    await _db.SaveChangesAsync(ct);
+                    await _bot.SendMessage(chatId, $"Регион определён: {user.Currency}", ct);
+                    return Results.Ok();
+                }
+
+                // === 2. ПОЛЬЗОВАТЕЛЬ ОТПРАВИЛ ФОТО (img2img) ===
                 if (message.Photo is { Length: > 0 } photoArray)
                 {
                     // Берём самое качественное фото
@@ -87,16 +100,37 @@ public class TelegramBotWorker : BackgroundService
                     // Сохраняем file_id в "контекст" пользователя (простой in-memory словарь)
                     UserPhotoContext[chatId] = fileId;
 
-                    await _bot.SendMessage(chatId,
-                        "Фото получил! Теперь отправь текст (промпт), что сделать с этим изображением:",
-                        cancellationToken: ct);
+                    await _bot.SendMessage(chatId, "Фото получил! Теперь отправь текст (промпт), что сделать с этим изображением:", cancellationToken: ct);
                     return Results.Ok();
                 }
 
-                // === 2. ПОЛЬЗОВАТЕЛЬ ОТПРАВИЛ ТЕКСТ, а у нас есть его фото ===
-                if (message.Text is { Length: > 0 } promptText
-                    && UserPhotoContext.TryGetValue(chatId, out var savedFileId))
+                // === 3. ПОЛЬЗОВАТЕЛЬ ОТПРАВИЛ ТЕКСТ, а у нас есть его фото ===
+                if (message.Text is not { Length: > 0 } text) return Results.Ok();
+
+                if (message.Text is { Length: > 0 } promptText && UserPhotoContext.TryGetValue(chatId, out var savedFileId))
                 {
+
+                    var user = await GetOrCreateUser(chatId);
+
+                    if (user.Credits <= 0)
+                    {
+                        await _bot.SendMessage(chatId, "Генерации закончились 😔\nКупи пакет: /buy", ct);
+                        return Results.Ok();
+                    }
+
+                    user.Credits--;
+                    await _db.SaveChangesAsync(ct);
+
+                    // Логируем использование
+                    _db.RequestLogs.Add(new RequestLog
+                    {
+                        UserId = chatId,
+                        Timestamp = DateTime.UtcNow,
+                        Action = "generate",
+                        Success = true
+                    });
+                    await _db.SaveChangesAsync(ct);
+
                     var prompt = promptText.Trim();
 
                     // Антиспам и бесплатный лимит — оставляем как у тебя было
@@ -168,6 +202,30 @@ public class TelegramBotWorker : BackgroundService
                     if (prompt is "/pro" or "/flex")
                     {
                         await _bot.SendMessage(chatId: chatId, text: $"Режим: {prompt[1..].ToUpper()}", cancellationToken: ct);
+                        return Results.Ok();
+                    }
+
+                    if (prompt.Equals("/buy", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var user = await GetOrCreateUser(chatId);
+
+                        var label = $"pack5_{chatId}"; // уникальный payload
+                        var quickpayUrl = $"https://yoomoney.ru/quickpay/confirm.xml" +
+                                          $"?receiver={_walletNumber}" +
+                                          $"&quickpay-form=shop" +
+                                          $"&targets=Покупка+5+генераций+изображений" +
+                                          $"&paymentType=PC" +          // PC = карта, AC = карта, SB = быстрый платёж
+                                          $"&sum=500" +                 // 500 RUB
+                                          $"&label={label}" +
+                                          $"&successURL=https://t.me/{(await _bot.GetMe(ct)).Username}";
+
+                        var keyboard = new InlineKeyboardMarkup(
+                            InlineKeyboardButton.WithUrl("💳 Оплатить 500 ₽ за 5 генераций", quickpayUrl));
+
+                        await _bot.SendMessage(chatId,
+                            $"У тебя {user.Credits} генераций.\nКупи пакет из 5 за 500 ₽:",
+                            replyMarkup: keyboard, ct);
+
                         return Results.Ok();
                     }
 
