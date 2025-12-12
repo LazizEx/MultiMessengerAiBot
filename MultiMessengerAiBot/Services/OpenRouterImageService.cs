@@ -1,5 +1,4 @@
-﻿
-using System.Text;
+﻿using System.Text;
 using System.Text.Json;
 
 namespace MultiMessengerAiBot.Services
@@ -68,17 +67,17 @@ namespace MultiMessengerAiBot.Services
 
             try
             {
-                var response = await _http.PostAsync("/api/v1/chat/completions", content, ct);
+                //var response = await _http.PostAsync("/api/v1/chat/completions", content, ct);
 
-                if (!response.IsSuccessStatusCode)
-                {
-                    var error = await response.Content.ReadAsStringAsync(ct);
-                    _logger.LogWarning("OpenRouter error {Status}: {Error}", response.StatusCode, error);
-                    return null;
-                }
+                //if (!response.IsSuccessStatusCode)
+                //{
+                //    var error = await response.Content.ReadAsStringAsync(ct);
+                //    _logger.LogWarning("OpenRouter error {Status}: {Error}", response.StatusCode, error);
+                //    return null;
+                //}
 
-                using var doc = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(ct), cancellationToken: ct);
-                //using var doc = ReadFile();
+                //using var doc = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(ct), cancellationToken: ct);
+                using var doc = ReadFile();
 
                 var root = doc.RootElement;
 
@@ -123,6 +122,70 @@ namespace MultiMessengerAiBot.Services
                 _logger.LogError(ex, "OpenRouter exception");
                 return null;
             }
+        }
+
+        public async Task<string?> GenerateFromImageAsync(string imageUrl, string prompt, CancellationToken ct = default)
+        {
+            var request = new
+            {
+                model = "black-forest-labs/flux.2-pro",           // поддерживает img2img
+                                                                  // model = "ideogram/ideogram-2.0"                // альтернатива, тоже отлично работает
+                messages = new[]
+                {
+            new
+            {
+                role = "user",
+                content = new object[]
+                {
+                    new { type = "text", text = prompt },
+                    new { type = "image_url", image_url = new { url = imageUrl } }
+                }
+            }
+        },
+                max_tokens = 1,
+                modalities = new[] { "image", "text" }
+            };
+
+            var content = new StringContent(
+                JsonSerializer.Serialize(request),
+                Encoding.UTF8,
+                "application/json");
+
+            var response = await _http.PostAsync("/api/v1/chat/completions", content, ct);
+
+            if (!response.IsSuccessStatusCode)
+                return null;
+            
+            using var doc = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(ct));
+            var root = doc.RootElement;
+
+            // Новый формат 2025 года
+            if (root.TryGetProperty("choices", out var choices) && choices.GetArrayLength() > 0)
+            {
+                var message = choices[0].GetProperty("message");
+
+                if (message.TryGetProperty("images", out var images) && images.GetArrayLength() > 0)
+                {
+                    var url = images[0].GetProperty("image_url").GetProperty("url").GetString();
+                    if (!string.IsNullOrEmpty(url))
+                        return url;
+
+                    if (images[0].TryGetProperty("b64_json", out var b64El))
+                    {
+                        var b64 = b64El.GetString();
+                        if (!string.IsNullOrEmpty(b64))
+                            return $"data:image/png;base64,{b64}";
+                    }
+                    return null;
+                }
+
+                // Старый fallback
+                var contentStr = message.GetProperty("content").GetString();
+                if (contentStr?.StartsWith("data:image") == true)
+                    return contentStr;
+            }
+
+            return null;
         }
 
         private static JsonDocument ReadFile()

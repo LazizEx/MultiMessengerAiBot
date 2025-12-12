@@ -1,6 +1,8 @@
 ﻿// Workers/TelegramBotWorker.cs
 using Microsoft.AspNetCore.Mvc;
 using MultiMessengerAiBot.Services;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
@@ -18,17 +20,16 @@ public class TelegramBotWorker : BackgroundService
     private readonly IBotService _imageService;
     private readonly ILogger<TelegramBotWorker> _logger;
     private readonly string _hostUrl;
+    private static readonly ConcurrentDictionary<long, string> UserPhotoContext = new(); // Хранит последнее фото пользователя (chatId → fileId)
+    private readonly string _token;
 
     // Защита от спама: максимум 1 запрос каждые 8 секунд на пользователя
     private readonly Dictionary<long, DateTime> _lastRequest = new();
 
-    public TelegramBotWorker(
-        IConfiguration cfg,
-        IBotService imageService,
-        ILogger<TelegramBotWorker> logger)
+    public TelegramBotWorker(IConfiguration cfg, IBotService imageService, ILogger<TelegramBotWorker> logger)
     {
-        var token = cfg["BotTokens:Telegram"] ?? throw new InvalidOperationException("Telegram token missing");
-        _bot = new TelegramBotClient(token);
+        _token = cfg["BotTokens:Telegram"] ?? throw new InvalidOperationException("Telegram token missing");
+        _bot = new TelegramBotClient(_token);
         _imageService = imageService;
         _logger = logger;
         _hostUrl = cfg["HostUrl"]!.TrimEnd('/');
@@ -64,7 +65,7 @@ public class TelegramBotWorker : BackgroundService
 
     public void MapTelegramWebhook(IEndpointRouteBuilder app)
     {
-        app.MapPost("/telegram/webhook", async (HttpRequest request, CancellationToken ct) =>
+        _ = app.MapPost("/telegram/webhook", async (HttpRequest request, CancellationToken ct) =>
         {
             var json = await new StreamReader(request.Body).ReadToEndAsync(ct);
             var update = JsonSerializer.Deserialize<Update>(json, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
@@ -73,119 +74,193 @@ public class TelegramBotWorker : BackgroundService
 
 
             // === ОБЫЧНЫЕ СООБЩЕНИЯ ===
-            if (update.Message?.Text is { Length: > 0 } text && update.Message.From is { } from)
+            if (update.Message is { } message && message.From is { } from)
             {
                 var chatId = update.Message.Chat.Id;
-                var prompt = text.Trim();
 
-                // /start
-                if (prompt.Equals("/start", StringComparison.OrdinalIgnoreCase))
+                // === 1. ПОЛЬЗОВАТЕЛЬ ОТПРАВИЛ ФОТО ===
+                if (message.Photo is { Length: > 0 } photoArray)
                 {
-                    await _bot.SendMessage(chatId: chatId, text: """
-                    Привет! Пиши любое описание — нарисую за 5 секунд
+                    // Берём самое качественное фото
+                    var fileId = photoArray[^1].FileId;
 
-                    • nano banana
-                    • кот в космосе
-                    • киберпанк-логотип
+                    // Сохраняем file_id в "контекст" пользователя (простой in-memory словарь)
+                    UserPhotoContext[chatId] = fileId;
 
-                    /pro  — максимальное качество
-                    /flex — быстрее и дешевле
-                    """, cancellationToken: ct);
+                    await _bot.SendMessage(chatId,
+                        "Фото получил! Теперь отправь текст (промпт), что сделать с этим изображением:",
+                        cancellationToken: ct);
                     return Results.Ok();
                 }
 
-                if (prompt is "/pro" or "/flex")
+                // === 2. ПОЛЬЗОВАТЕЛЬ ОТПРАВИЛ ТЕКСТ, а у нас есть его фото ===
+                if (message.Text is { Length: > 0 } promptText
+                    && UserPhotoContext.TryGetValue(chatId, out var savedFileId))
                 {
-                    await _bot.SendMessage(chatId: chatId, text: $"Режим: {prompt[1..].ToUpper()}", cancellationToken: ct);
+                    var prompt = promptText.Trim();
+
+                    // Антиспам и бесплатный лимит — оставляем как у тебя было
+                    if (_lastRequest.TryGetValue(chatId, out var last) &&
+                        (DateTime.UtcNow - last).TotalSeconds < 8)
+                    {
+                        await _bot.SendMessage(chatId, "Подожди 8 секунд", cancellationToken: ct);
+                        return Results.Ok();
+                    }
+                    _lastRequest[chatId] = DateTime.UtcNow;
+
+                    await _bot.SendChatAction(chatId, ChatAction.UploadPhoto, cancellationToken: ct);
+                    var loading = await _bot.SendDocument(chatId,
+                        InputFile.FromUri($"{_hostUrl}/ProgressBar.gif"),
+                        caption: "Обрабатываю твоё фото…", cancellationToken: ct);
+
+                    // Скачиваем фото из Telegram
+                    var file = await _bot.GetFile(savedFileId, ct);
+                    var photoUrl = $"https://api.telegram.org/file/bot{_token}/{file.FilePath}";
+
+                    // Удаляем из контекста — фото использовано один раз
+                    UserPhotoContext.Remove(chatId, out var v);
+
+                    // ←←← ВЫЗЫВАЕМ СЕРВИС (пока заглушка, потом подключишь настоящий img2img)
+                    var resultImageUrl = await _imageService.GenerateFromImageAsync(photoUrl, prompt, ct);
+
+                    await _bot.DeleteMessage(chatId, loading.MessageId, ct);
+
+                    if (!string.IsNullOrEmpty(resultImageUrl))
+                    {
+                        InputFile resultPhoto = resultImageUrl.StartsWith("data:image")
+                            ? InputFile.FromStream(StreamFromBase64(resultImageUrl), "resultImageUrl")
+
+                            : InputFile.FromUri(resultImageUrl);
+
+                        await _bot.SendPhoto(chatId, resultPhoto, caption: prompt, cancellationToken: ct);
+                    }
+                    else
+                    {
+                        await _bot.SendMessage(chatId, "Не получилось обработать фото", cancellationToken: ct);
+                    }
+
                     return Results.Ok();
                 }
 
-                // Антиспам
-                if (_lastRequest.TryGetValue(chatId, out var last) && (DateTime.UtcNow - last).TotalSeconds < 8)
+
+                // === 3. ОБЫЧНЫЙ ТЕКСТ БЕЗ ФОТО (старое поведение) ===
+                if (message.Text is { Length: > 0 } text)
                 {
-                    await _bot.SendMessage(chatId: chatId, text: "Подожди 8 секунд", cancellationToken: ct);
-                    return Results.Ok();
-                }
-                _lastRequest[chatId] = DateTime.UtcNow;
+                    var prompt = text.Trim();
 
-                // Прогресс-бар
-                await _bot.SendChatAction(chatId, ChatAction.UploadPhoto, cancellationToken: ct);
+                    // /start
+                    if (prompt.Equals("/start", StringComparison.OrdinalIgnoreCase))
+                    {
+                        await _bot.SendMessage(chatId: chatId, text: """
+                            Привет! Пиши любое описание — нарисую за 5 секунд
 
-                // ←←← ВОЛШЕБНЫЙ GIF-ПРОГРЕСС ←←←
-                var loadingMessage = await _bot.SendDocument(
-                    chatId: chatId,
-                    document: InputFile.FromUri($"{_hostUrl}/ProgressBar.gif"),
-                    caption: "Генерирую твою картинку…",
-                    cancellationToken: ct);
+                            • nano banana
+                            • кот в космосе
+                            • киберпанк-логотип
+
+                            /pro  — максимальное качество
+                            /flex — быстрее и дешевле
+                            """,
+                            cancellationToken: ct);
+                        return Results.Ok();
+                    }
+
+                    if (prompt is "/pro" or "/flex")
+                    {
+                        await _bot.SendMessage(chatId: chatId, text: $"Режим: {prompt[1..].ToUpper()}", cancellationToken: ct);
+                        return Results.Ok();
+                    }
+
+                    // Антиспам
+                    if (_lastRequest.TryGetValue(chatId, out var last) && (DateTime.UtcNow - last).TotalSeconds < 8)
+                    {
+                        await _bot.SendMessage(chatId: chatId, text: "Подожди 8 секунд", cancellationToken: ct);
+                        return Results.Ok();
+                    }
+                    _lastRequest[chatId] = DateTime.UtcNow;
+
+                    // Прогресс-бар
+                    await _bot.SendChatAction(chatId, ChatAction.UploadPhoto, cancellationToken: ct);
+
+                    // ←←← ВОЛШЕБНЫЙ GIF-ПРОГРЕСС ←←←
+                    var loadingMessage = await _bot.SendDocument(
+                        chatId: chatId,
+                        document: InputFile.FromUri($"{_hostUrl}/ProgressBar.gif"),
+                        caption: "Генерирую твою картинку…",
+                        cancellationToken: ct);
 
 
-                var model = prompt.StartsWith("/pro ") ? "pro" : prompt.StartsWith("/flex ") ? "flex" : "pro";
-                var cleanPrompt = prompt.Replace("/pro ", "").Replace("/flex ", "").Trim();
+                    var model = prompt.StartsWith("/pro ") ? "pro" : prompt.StartsWith("/flex ") ? "flex" : "pro";
+                    var cleanPrompt = prompt.Replace("/pro ", "").Replace("/flex ", "").Trim();
 
-                var imageDataUri = await _imageService.GetImageUrlAsync(cleanPrompt, model, ct);
+                    var imageDataUri = await _imageService.GetImageUrlAsync(cleanPrompt, model, ct);
 
-                // Удаляем GIF
-                try{
-                    await _bot.DeleteMessage(chatId: chatId, messageId: loadingMessage.MessageId, cancellationToken: ct);
-                }
-                catch {}
-                await _bot.SendChatAction(chatId, ChatAction.UploadPhoto, cancellationToken: ct);
-
-                if (!string.IsNullOrEmpty(imageDataUri))
-                {
+                    // Удаляем GIF
                     try
+                    {
+                        await _bot.DeleteMessage(chatId: chatId, messageId: loadingMessage.MessageId, cancellationToken: ct);
+                    }
+                    catch { }
+                    await _bot.SendChatAction(chatId, ChatAction.UploadPhoto, cancellationToken: ct);
+
+                    if (!string.IsNullOrEmpty(imageDataUri))
                     {
                         try
                         {
-                            InputFile photo = imageDataUri.StartsWith("data:image")
-                                ? InputFile.FromStream(StreamFromBase64(imageDataUri), "image.png")
-                                : InputFile.FromUri(imageDataUri);
+                            try
+                            {
+                                InputFile photo = imageDataUri.StartsWith("data:image")
+                                    ? InputFile.FromStream(StreamFromBase64(imageDataUri), "image.png")
+                                    : InputFile.FromUri(imageDataUri);
 
-                            await SendPhotoWithCaption(chatId, photo, cleanPrompt, ct);
+                                await SendPhotoWithCaption(chatId, photo, cleanPrompt, ct);
+                            }
+                            catch (Exception ex)
+                            {
+                                _logger.LogError(ex, "Failed to send image");
+                                await _bot.SendMessage(chatId, "Ошибка при отправке картинки", cancellationToken: ct);
+                            }
+
+
+                            //if (imageDataUri?.StartsWith("data:image") == true)
+                            //{
+                            //    var base64 = imageDataUri.Split(',')[1];
+                            //    var bytes = Convert.FromBase64String(base64);
+                            //    await using var stream = new MemoryStream(bytes) { Position = 0 };
+
+                            //    //var keyboard = new InlineKeyboardMarkup(InlineKeyboardButton.WithCallbackData("Ещё одну!", $"again:{cleanPrompt}:{model}"));
+
+                            //    await _botPhoto(
+                            //        chatId: chatId,
+                            //        photo: InputFile.FromStream(stream, "nano.png"),
+                            //        caption: cleanPrompt.Length <= 100 ? cleanPrompt : "Готово!",
+                            //        //replyMarkup: keyboard,
+                            //        ct);
+                            //}
+                            //else if (Uri.TryCreate(imageDataUri, UriKind.Absolute, out _))
+                            //{
+                            //    // Обычная ссылка — шлём напрямую
+                            //    await _botPhoto(chatId, InputFile.FromUri(imageDataUri), caption: cleanPrompt.Length <= 100 ? cleanPrompt : "Готово!", ct);
+                            //}
+                            //else
+                            //{
+                            //    await _bot.SendMessage(chatId: chatId, text: "Неподдерживаемый формат изображения)", cancellationToken: ct);
+                            //}
                         }
                         catch (Exception ex)
                         {
-                            _logger.LogError(ex, "Failed to send image");
-                            await _bot.SendMessage(chatId, "Ошибка при отправке картинки", cancellationToken: ct);
+                            _logger.LogError(ex, "Ошибка при отправке изображения");
+                            await _bot.SendMessage(chatId, "Ой, что-то пошло не так при отправке картинки", cancellationToken: ct);
                         }
 
-
-                        //if (imageDataUri?.StartsWith("data:image") == true)
-                        //{
-                        //    var base64 = imageDataUri.Split(',')[1];
-                        //    var bytes = Convert.FromBase64String(base64);
-                        //    await using var stream = new MemoryStream(bytes) { Position = 0 };
-
-                        //    //var keyboard = new InlineKeyboardMarkup(InlineKeyboardButton.WithCallbackData("Ещё одну!", $"again:{cleanPrompt}:{model}"));
-
-                        //    await _botPhoto(
-                        //        chatId: chatId,
-                        //        photo: InputFile.FromStream(stream, "nano.png"),
-                        //        caption: cleanPrompt.Length <= 100 ? cleanPrompt : "Готово!",
-                        //        //replyMarkup: keyboard,
-                        //        ct);
-                        //}
-                        //else if (Uri.TryCreate(imageDataUri, UriKind.Absolute, out _))
-                        //{
-                        //    // Обычная ссылка — шлём напрямую
-                        //    await _botPhoto(chatId, InputFile.FromUri(imageDataUri), caption: cleanPrompt.Length <= 100 ? cleanPrompt : "Готово!", ct);
-                        //}
-                        //else
-                        //{
-                        //    await _bot.SendMessage(chatId: chatId, text: "Неподдерживаемый формат изображения)", cancellationToken: ct);
-                        //}
                     }
-                    catch (Exception ex)
+                    else
                     {
-                        _logger.LogError(ex, "Ошибка при отправке изображения");
-                        await _bot.SendMessage(chatId, "Ой, что-то пошло не так при отправке картинки", cancellationToken: ct);
+                        await _bot.SendMessage(chatId: chatId, text: "Не удалось сгенерировать изображение (проверь баланс или попробуй позже)", cancellationToken: ct);
                     }
-                    
                 }
-                else
-                {
-                    await _bot.SendMessage(chatId: chatId, text: "Не удалось сгенерировать изображение (проверь баланс или попробуй позже)", cancellationToken: ct);
-                }
+
+
 
 
             }
