@@ -1,22 +1,27 @@
-﻿# Build stage
+﻿# Этап сборки
 FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
 WORKDIR /src
 
-# Копируем csproj из подпапки
+# Копируем только .csproj и восстанавливаем зависимости
 COPY MultiMessengerAiBot/*.csproj ./MultiMessengerAiBot/
 WORKDIR /src/MultiMessengerAiBot
-RUN dotnet restore
+RUN dotnet restore "MultiMessengerAiBot.csproj"
 
-# Копируем остальной код
-WORKDIR /src
-COPY MultiMessengerAiBot/. ./MultiMessengerAiBot/
+# Копируем весь остальной код проекта
+COPY MultiMessengerAiBot/. ./
 
-WORKDIR /src/MultiMessengerAiBot
-RUN dotnet publish -c Release -o /app/publish --no-restore
+# Публикуем приложение
+RUN dotnet publish "MultiMessengerAiBot.csproj" -c Release -o /app/publish --no-restore
 
-# Runtime stage
+# Финальный runtime-образ
 FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS final
 WORKDIR /app
-COPY --from=build /app/publish .
+
+# Копируем опубликованные файлы
+COPY --from=build /app/publish ./
+
+# Render автоматически задаёт переменную $PORT
 ENV ASPNETCORE_URLS=http://0.0.0.0:$PORT
-ENTRYPOINT ["dotnet", "MultiMessengerAiBot.dll"]  # ← имя dll от твоего проекта
+
+# Точка входа
+ENTRYPOINT ["dotnet", "MultiMessengerAiBot.dll"]
