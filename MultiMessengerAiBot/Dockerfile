@@ -14,5 +14,5 @@ RUN dotnet publish -c Release -o /app/publish --no-restore
 FROM base AS final
 WORKDIR /app
 COPY --from=build /app/publish .
-ENV ASPNETCORE_URLS=http://0.0.0.0:$PORT   # Render использует переменную $PORT
-ENTRYPOINT ["dotnet", "MultiMessengerAiBot.dll"]  # ← замени на имя своего .dll (обычно имя проекта + .dll)
+ENV ASPNETCORE_URLS=http://0.0.0.0:$PORT
+ENTRYPOINT ["dotnet", "MultiMessengerAiBot.dll"] 
