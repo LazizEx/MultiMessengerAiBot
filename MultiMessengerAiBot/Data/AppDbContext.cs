@@ -19,16 +19,16 @@ namespace MultiMessengerAiBot.Data
         }
     }
 
-    public class AppDbContextFactory : IDesignTimeDbContextFactory<AppDbContext>
-    {
-        public AppDbContext CreateDbContext(string[] args)
-        {
-            var optionsBuilder = new DbContextOptionsBuilder<AppDbContext>();
-            optionsBuilder.UseSqlite("Data Source=bot.db"); // Тот же connection string
+    //public class AppDbContextFactory : IDesignTimeDbContextFactory<AppDbContext>
+    //{
+    //    public AppDbContext CreateDbContext(string[] args)
+    //    {
+    //        var optionsBuilder = new DbContextOptionsBuilder<AppDbContext>();
+    //        optionsBuilder.UseSqlite("Data Source=bot.db"); // Тот же connection string
 
-            return new AppDbContext(optionsBuilder.Options);
-        }
-    }
+    //        return new AppDbContext(optionsBuilder.Options);
+    //    }
+    //}
 
     public class User
     {
@@ -38,6 +38,10 @@ namespace MultiMessengerAiBot.Data
         public long? ReferredBy { get; set; } // кто пригласил
         public string? PhoneNumber { get; set; } // для локализации
         public string Currency { get; set; } = "RUB"; // по умолчанию RUB
+        
+        public string? FirstName { get; set; }
+        public string? LastName { get; set; }
+        public string? Username { get; set; }
     }
 
     public class RequestLog // для аналитики и анти-абьюз

@@ -1,5 +1,6 @@
 ﻿// Workers/TelegramBotWorker.cs
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 using MultiMessengerAiBot.Data;
 using MultiMessengerAiBot.Services;
 using System.Collections.Concurrent;
@@ -21,23 +22,26 @@ public class TelegramBotWorker : BackgroundService
     private readonly IBotService _imageService;
     private readonly ILogger<TelegramBotWorker> _logger;
     private readonly string _hostUrl;
-    private static readonly ConcurrentDictionary<long, string> UserPhotoContext = new(); // Хранит последнее фото пользователя (chatId → fileId)
+    private readonly IConfiguration _cfg;
     private readonly string _token;
     private readonly string _walletNumber;
-    private readonly AppDbContext _db;
+    //private readonly AppDbContext _db;
+    private readonly IServiceProvider _services;           // ← вместо AppDbContext
 
     // Защита от спама: максимум 1 запрос каждые 8 секунд на пользователя
     private readonly Dictionary<long, DateTime> _lastRequest = new();
+    private static readonly ConcurrentDictionary<long, string> UserPhotoContext = new(); // Хранит последнее фото пользователя (chatId → fileId)
 
-    public TelegramBotWorker(IConfiguration cfg, IBotService imageService, ILogger<TelegramBotWorker> logger, AppDbContext db)
+    public TelegramBotWorker(IConfiguration cfg, IBotService imageService, IServiceProvider services, ILogger<TelegramBotWorker> logger)
     {
         _token = cfg["BotTokens:Telegram"] ?? throw new InvalidOperationException("Telegram token missing");
         _bot = new TelegramBotClient(_token);
         _imageService = imageService;
         _logger = logger;
+        _cfg = cfg;
         _hostUrl = cfg["HostUrl"]!.TrimEnd('/');
         _walletNumber = cfg["YooMoney:WalletNumber"] ?? throw new InvalidOperationException("Missing wallet");
-        _db = db;
+        _services = services;
     }
 
     protected override async Task ExecuteAsync(CancellationToken ct)
@@ -67,12 +71,15 @@ public class TelegramBotWorker : BackgroundService
 
     public void MapTelegramWebhook(IEndpointRouteBuilder app)
     {
-        _ = app.MapPost("/telegram/webhook", async (HttpRequest request, CancellationToken ct) =>
+        app.MapPost("/telegram/webhook", async (HttpRequest request, CancellationToken ct) =>
         {
             var json = await new StreamReader(request.Body).ReadToEndAsync(ct);
             var update = JsonSerializer.Deserialize<Update>(json, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-
             if (update == null) return Results.Ok();
+            
+            // Создаём scope для всего обработчика
+            await using var scope = _services.CreateAsyncScope();
+            await using var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
 
 
             // === ОБЫЧНЫЕ СООБЩЕНИЯ ===
@@ -83,11 +90,12 @@ public class TelegramBotWorker : BackgroundService
                 // === 1. ПОЛУЧЕНИЕ КОНТАКТА (для локализации) ===
                 if (message.Contact is { } contact)
                 {
-                    var user = await GetOrCreateUser(chatId);
+                    var user = await db.Users.FindAsync(chatId) ?? new Data.User { TelegramId = chatId };
                     user.PhoneNumber = contact.PhoneNumber;
                     user.Currency = contact.PhoneNumber.StartsWith("+998") ? "UZS" : "RUB";
-                    await _db.SaveChangesAsync(ct);
-                    await _bot.SendMessage(chatId, $"Регион определён: {user.Currency}", ct);
+                    if (user.TelegramId == 0) db.Users.Add(user);
+                    await db.SaveChangesAsync(ct);
+                    await _bot.SendMessage(chatId, $"Регион определён: {user.Currency}", cancellationToken: ct);
                     return Results.Ok();
                 }
 
@@ -96,231 +104,250 @@ public class TelegramBotWorker : BackgroundService
                 {
                     // Берём самое качественное фото
                     var fileId = photoArray[^1].FileId;
-
                     // Сохраняем file_id в "контекст" пользователя (простой in-memory словарь)
                     UserPhotoContext[chatId] = fileId;
-
                     await _bot.SendMessage(chatId, "Фото получил! Теперь отправь текст (промпт), что сделать с этим изображением:", cancellationToken: ct);
                     return Results.Ok();
                 }
 
                 // === 3. ПОЛЬЗОВАТЕЛЬ ОТПРАВИЛ ТЕКСТ, а у нас есть его фото ===
                 if (message.Text is not { Length: > 0 } text) return Results.Ok();
+                var prompt = text.Trim();
 
-                if (message.Text is { Length: > 0 } promptText && UserPhotoContext.TryGetValue(chatId, out var savedFileId))
+                // /start и реферальная система
+                if (prompt.Equals("/start", StringComparison.OrdinalIgnoreCase) || prompt.StartsWith("/start ref_"))
                 {
+                    var user = await db.Users.FindAsync(chatId);
 
-                    var user = await GetOrCreateUser(chatId);
-
-                    if (user.Credits <= 0)
+                    // Если пользователя ещё нет — создаём с базовыми данными
+                    if (user == null)
                     {
-                        await _bot.SendMessage(chatId, "Генерации закончились 😔\nКупи пакет: /buy", ct);
+                        user = new Data.User
+                        {
+                            TelegramId = chatId,
+                            Credits = 1,
+                            FirstName = message.From?.FirstName,
+                            LastName = message.From?.LastName,
+                            Username = message.From?.Username
+                        };
+                        db.Users.Add(user);
+                    }
+
+                    // ОБРАБАТЫВАЕМ РЕФЕРАЛКУ СНАЧАЛА
+                    long? referrerId = null;
+                    if (prompt.StartsWith("/start ref_"))
+                    {
+                        var refCode = prompt["/start ref_".Length..].Trim();
+                        var referrer = await db.Users.FirstOrDefaultAsync(u => u.ReferralCode == refCode, ct);
+                        if (referrer != null && referrer.TelegramId != chatId)
+                        {
+                            referrerId = referrer.TelegramId;
+                            user.ReferredBy = referrerId;
+
+                            // Даём бонусы сразу
+                            user.Credits += 2;
+                            referrer.Credits += 2;
+                        }
+                    }
+
+                    // Генерируем реф-код ТОЛЬКО если его ещё нет
+                    if (string.IsNullOrEmpty(user.ReferralCode))
+                    {
+                        user.ReferralCode = Guid.NewGuid().ToString("N")[..8].ToUpper();
+                    }
+
+                    // Сохраняем ВСЁ ОДНИМ SaveChanges (важно!)
+                    await db.SaveChangesAsync(ct);
+
+                    // === ЕСЛИ ТЕЛЕФОН ЕЩЁ НЕТ — ЗАПРАШИВАЕМ ===
+                    if (string.IsNullOrEmpty(user.PhoneNumber))
+                    {
+                        var requestPhoneKeyboard = new ReplyKeyboardMarkup(new[]
+                        {
+                            new KeyboardButton("📱 Поделиться номером") { RequestContact = true }
+                        })
+                        {
+                            ResizeKeyboard = true,
+                            OneTimeKeyboard = true
+                        };
+
+                        await _bot.SendMessage(chatId,
+                            $"Привет, {user.FirstName ?? "друг"}!\n\n" +
+                            $"Чтобы продолжить, поделись номером телефона — это нужно для оплаты и безопасности.\n\n" +
+                            $"У тебя {user.Credits} генераций\n\n" +
+                            $"Твоя реферальная ссылка: https://t.me/{(await _bot.GetMe(ct)).Username}?start=ref_{user.ReferralCode}"+
+                            $"/buy — купить генерации\n/balance — проверить остаток",
+                            replyMarkup: requestPhoneKeyboard,  cancellationToken: ct);
+
                         return Results.Ok();
                     }
 
-                    user.Credits--;
-                    await _db.SaveChangesAsync(ct);
-
-                    // Логируем использование
-                    _db.RequestLogs.Add(new RequestLog
+                    // Уведомляем реферера
+                    if (referrerId.HasValue)
                     {
-                        UserId = chatId,
-                        Timestamp = DateTime.UtcNow,
-                        Action = "generate",
-                        Success = true
+                        await _bot.SendMessage(referrerId.Value, "По твоей реферальной ссылке пришёл новый пользователь! +2 кредита", cancellationToken: ct);
+                    }
+
+                    var botName = (await _bot.GetMe(ct)).Username;
+                    var refLink = $"https://t.me/{botName}?start=ref_{user.ReferralCode}";
+
+                    await _bot.SendMessage(chatId,
+                        $"С возвращением, {user.FirstName ?? "друг"}!\n\n" +
+                        $"У тебя {user.Credits} генераций\n\n" +
+                        $"Реферальная ссылка:\n{refLink}\nПригласи друга — оба получите +2 кредита!\n\n" +
+                        $"/buy — купить генерации\n/balance — проверить остаток",
+                        cancellationToken: ct);
+
+                    // Убираем клавиатуру после первого сообщения
+                    await _bot.SendMessage(chatId, ".", replyMarkup: new ReplyKeyboardRemove(), cancellationToken: ct);
+                    return Results.Ok();
+                }
+
+                // /balance
+                if (prompt.Equals("/balance", StringComparison.OrdinalIgnoreCase))
+                {
+                    var user = await db.Users.FindAsync(chatId) ?? new Data.User { TelegramId = chatId, Credits = 1 };
+                    if (user.TelegramId == 0) db.Users.Add(user);
+                    await db.SaveChangesAsync(ct);
+                    await _bot.SendMessage(chatId, $"У тебя {user.Credits} генераций", cancellationToken: ct);
+                    return Results.Ok();
+                }
+
+                //// /buy — оплата через личный YooMoney кошелёк
+                //if (prompt.Equals("/buy", StringComparison.OrdinalIgnoreCase))
+                //{
+                //    var user = await db.Users.FindAsync(chatId) ?? new Data.User { TelegramId = chatId, Credits = 1 };
+                //    if (user.TelegramId == 0) db.Users.Add(user);
+                //    await db.SaveChangesAsync(ct);
+
+                //    var label = $"pack5_{chatId}";
+                //    var paymentUrl = $"https://yoomoney.ru/quickpay/confirm.xml" +
+                //                     $"?receiver={_walletNumber}" +
+                //                     $"&quickpay-form=shop" +
+                //                     $"&targets=Покупка+5+генераций+AI-изображений" +
+                //                     $"&paymentType=PC" +
+                //                     $"&sum=500" +
+                //                     $"&label={label}" +
+                //                     $"&successURL=https://t.me/{(await _bot.GetMe(ct)).Username}";
+
+                //    var keyboard = new InlineKeyboardMarkup(InlineKeyboardButton.WithUrl("Оплатить 500 ₽ → 5 генераций", paymentUrl));
+
+                //    await _bot.SendMessage(chatId,
+                //        $"У тебя {user.Credits} генераций\n\nКупи 5 за 500 ₽:",
+                //        replyMarkup: keyboard, cancellationToken: ct);
+                //    return Results.Ok();
+                //}
+
+                // /buy — открываем Mini App
+                if (prompt.Equals("/buy", StringComparison.OrdinalIgnoreCase))
+                {
+                    var user = await db.Users.FindAsync(chatId);
+                    if (user == null)
+                    {
+                        user = new Data.User { TelegramId = chatId, Credits = 1 };
+                        db.Users.Add(user);
+                        await db.SaveChangesAsync(ct);
+                    }
+
+                    var keyboard = new InlineKeyboardMarkup(new[]
+                    {
+                    InlineKeyboardButton.WithWebApp("💳 Докупить генерации", new WebAppInfo() { Url = $"{_hostUrl}/buy.html" }),
+                    // Вторую кнопку добавим позже
                     });
-                    await _db.SaveChangesAsync(ct);
 
-                    var prompt = promptText.Trim();
-
-                    // Антиспам и бесплатный лимит — оставляем как у тебя было
-                    if (_lastRequest.TryGetValue(chatId, out var last) &&
-                        (DateTime.UtcNow - last).TotalSeconds < 8)
-                    {
-                        await _bot.SendMessage(chatId, "Подожди 8 секунд", cancellationToken: ct);
-                        return Results.Ok();
-                    }
-                    _lastRequest[chatId] = DateTime.UtcNow;
-
-                    await _bot.SendChatAction(chatId, ChatAction.UploadPhoto, cancellationToken: ct);
-                    var loading = await _bot.SendDocument(chatId,
-                        InputFile.FromUri($"{_hostUrl}/ProgressBar.gif"),
-                        caption: "Обрабатываю твоё фото…", cancellationToken: ct);
-
-                    // Скачиваем фото из Telegram
-                    var file = await _bot.GetFile(savedFileId, ct);
-                    var photoUrl = $"https://api.telegram.org/file/bot{_token}/{file.FilePath}";
-
-                    // Удаляем из контекста — фото использовано один раз
-                    UserPhotoContext.Remove(chatId, out var v);
-
-                    // ←←← ВЫЗЫВАЕМ СЕРВИС (пока заглушка, потом подключишь настоящий img2img)
-                    var resultImageUrl = await _imageService.GenerateFromImageAsync(photoUrl, prompt, ct);
-
-                    await _bot.DeleteMessage(chatId, loading.MessageId, ct);
-
-                    if (!string.IsNullOrEmpty(resultImageUrl))
-                    {
-                        InputFile resultPhoto = resultImageUrl.StartsWith("data:image")
-                            ? InputFile.FromStream(StreamFromBase64(resultImageUrl), "resultImageUrl")
-
-                            : InputFile.FromUri(resultImageUrl);
-
-                        await _bot.SendPhoto(chatId, resultPhoto, caption: prompt, cancellationToken: ct);
-                    }
-                    else
-                    {
-                        await _bot.SendMessage(chatId, "Не получилось обработать фото", cancellationToken: ct);
-                    }
+                    await _bot.SendMessage(chatId,
+                        $"У тебя {user.Credits} генераций\n\nВыбери способ оплаты:",
+                        replyMarkup: keyboard, cancellationToken: ct);
 
                     return Results.Ok();
                 }
 
+                // === 4. ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЯ (txt2img или img2img) ===
+                var currentUser = await db.Users.FindAsync(chatId) ?? new Data.User { TelegramId = chatId, Credits = 1 };
+                if (currentUser.TelegramId == 0) { db.Users.Add(currentUser); await db.SaveChangesAsync(ct); }
 
-                // === 3. ОБЫЧНЫЙ ТЕКСТ БЕЗ ФОТО (старое поведение) ===
-                if (message.Text is { Length: > 0 } text)
+                // Антиспам
+                if (_lastRequest.TryGetValue(chatId, out var last) && (DateTime.UtcNow - last).TotalSeconds < 8)
                 {
-                    var prompt = text.Trim();
+                    await _bot.SendMessage(chatId, "Подожди 8 секунд", cancellationToken: ct);
+                    return Results.Ok();
+                }
+                _lastRequest[chatId] = DateTime.UtcNow;
 
-                    // /start
-                    if (prompt.Equals("/start", StringComparison.OrdinalIgnoreCase))
-                    {
-                        await _bot.SendMessage(chatId: chatId, text: """
-                            Привет! Пиши любое описание — нарисую за 5 секунд
-
-                            • nano banana
-                            • кот в космосе
-                            • киберпанк-логотип
-
-                            /pro  — максимальное качество
-                            /flex — быстрее и дешевле
-                            """,
-                            cancellationToken: ct);
-                        return Results.Ok();
-                    }
-
-                    if (prompt is "/pro" or "/flex")
-                    {
-                        await _bot.SendMessage(chatId: chatId, text: $"Режим: {prompt[1..].ToUpper()}", cancellationToken: ct);
-                        return Results.Ok();
-                    }
-
-                    if (prompt.Equals("/buy", StringComparison.OrdinalIgnoreCase))
-                    {
-                        var user = await GetOrCreateUser(chatId);
-
-                        var label = $"pack5_{chatId}"; // уникальный payload
-                        var quickpayUrl = $"https://yoomoney.ru/quickpay/confirm.xml" +
-                                          $"?receiver={_walletNumber}" +
-                                          $"&quickpay-form=shop" +
-                                          $"&targets=Покупка+5+генераций+изображений" +
-                                          $"&paymentType=PC" +          // PC = карта, AC = карта, SB = быстрый платёж
-                                          $"&sum=500" +                 // 500 RUB
-                                          $"&label={label}" +
-                                          $"&successURL=https://t.me/{(await _bot.GetMe(ct)).Username}";
-
-                        var keyboard = new InlineKeyboardMarkup(
-                            InlineKeyboardButton.WithUrl("💳 Оплатить 500 ₽ за 5 генераций", quickpayUrl));
-
-                        await _bot.SendMessage(chatId,
-                            $"У тебя {user.Credits} генераций.\nКупи пакет из 5 за 500 ₽:",
-                            replyMarkup: keyboard, ct);
-
-                        return Results.Ok();
-                    }
-
-                    // Антиспам
-                    if (_lastRequest.TryGetValue(chatId, out var last) && (DateTime.UtcNow - last).TotalSeconds < 8)
-                    {
-                        await _bot.SendMessage(chatId: chatId, text: "Подожди 8 секунд", cancellationToken: ct);
-                        return Results.Ok();
-                    }
-                    _lastRequest[chatId] = DateTime.UtcNow;
-
-                    // Прогресс-бар
-                    await _bot.SendChatAction(chatId, ChatAction.UploadPhoto, cancellationToken: ct);
-
-                    // ←←← ВОЛШЕБНЫЙ GIF-ПРОГРЕСС ←←←
-                    var loadingMessage = await _bot.SendDocument(
-                        chatId: chatId,
-                        document: InputFile.FromUri($"{_hostUrl}/ProgressBar.gif"),
-                        caption: "Генерирую твою картинку…",
-                        cancellationToken: ct);
-
-
-                    var model = prompt.StartsWith("/pro ") ? "pro" : prompt.StartsWith("/flex ") ? "flex" : "pro";
-                    var cleanPrompt = prompt.Replace("/pro ", "").Replace("/flex ", "").Trim();
-
-                    var imageDataUri = await _imageService.GetImageUrlAsync(cleanPrompt, model, ct);
-
-                    // Удаляем GIF
-                    try
-                    {
-                        await _bot.DeleteMessage(chatId: chatId, messageId: loadingMessage.MessageId, cancellationToken: ct);
-                    }
-                    catch { }
-                    await _bot.SendChatAction(chatId, ChatAction.UploadPhoto, cancellationToken: ct);
-
-                    if (!string.IsNullOrEmpty(imageDataUri))
-                    {
-                        try
-                        {
-                            try
-                            {
-                                InputFile photo = imageDataUri.StartsWith("data:image")
-                                    ? InputFile.FromStream(StreamFromBase64(imageDataUri), "image.png")
-                                    : InputFile.FromUri(imageDataUri);
-
-                                await SendPhotoWithCaption(chatId, photo, cleanPrompt, ct);
-                            }
-                            catch (Exception ex)
-                            {
-                                _logger.LogError(ex, "Failed to send image");
-                                await _bot.SendMessage(chatId, "Ошибка при отправке картинки", cancellationToken: ct);
-                            }
-
-
-                            //if (imageDataUri?.StartsWith("data:image") == true)
-                            //{
-                            //    var base64 = imageDataUri.Split(',')[1];
-                            //    var bytes = Convert.FromBase64String(base64);
-                            //    await using var stream = new MemoryStream(bytes) { Position = 0 };
-
-                            //    //var keyboard = new InlineKeyboardMarkup(InlineKeyboardButton.WithCallbackData("Ещё одну!", $"again:{cleanPrompt}:{model}"));
-
-                            //    await _botPhoto(
-                            //        chatId: chatId,
-                            //        photo: InputFile.FromStream(stream, "nano.png"),
-                            //        caption: cleanPrompt.Length <= 100 ? cleanPrompt : "Готово!",
-                            //        //replyMarkup: keyboard,
-                            //        ct);
-                            //}
-                            //else if (Uri.TryCreate(imageDataUri, UriKind.Absolute, out _))
-                            //{
-                            //    // Обычная ссылка — шлём напрямую
-                            //    await _botPhoto(chatId, InputFile.FromUri(imageDataUri), caption: cleanPrompt.Length <= 100 ? cleanPrompt : "Готово!", ct);
-                            //}
-                            //else
-                            //{
-                            //    await _bot.SendMessage(chatId: chatId, text: "Неподдерживаемый формат изображения)", cancellationToken: ct);
-                            //}
-                        }
-                        catch (Exception ex)
-                        {
-                            _logger.LogError(ex, "Ошибка при отправке изображения");
-                            await _bot.SendMessage(chatId, "Ой, что-то пошло не так при отправке картинки", cancellationToken: ct);
-                        }
-
-                    }
-                    else
-                    {
-                        await _bot.SendMessage(chatId: chatId, text: "Не удалось сгенерировать изображение (проверь баланс или попробуй позже)", cancellationToken: ct);
-                    }
+                // Проверка кредитов
+                if (currentUser.Credits <= 0)
+                {
+                    await _bot.SendMessage(chatId, "Генерации закончились\nПополни баланс: /buy", cancellationToken: ct);
+                    return Results.Ok();
                 }
 
+                // Анти-абьюз: не больше 4 запросов за 5 минут
+                var recent = await db.RequestLogs.CountAsync(l =>
+                    l.UserId == chatId && l.Timestamp > DateTime.UtcNow.AddMinutes(-5), ct);
+                if (recent > 4)
+                {
+                    await _bot.SendMessage(chatId, "Слишком много запросов. Подожди пару минут", cancellationToken: ct);
+                    return Results.Ok();
+                }
 
+                // Прогресс-GIF
+                await _bot.SendChatAction(chatId, ChatAction.UploadPhoto, cancellationToken: ct);
+                var loadingMsg = await _bot.SendDocument(chatId,
+                    document: InputFile.FromUri($"{_hostUrl}/ProgressBar.gif"),
+                    caption: "Генерирую…", cancellationToken: ct);
 
+                string? resultImageUrl = null;
+                bool success = false;
 
+                try
+                {
+                    // img2img — если есть сохранённое фото
+                    if (UserPhotoContext.TryRemove(chatId, out var fileId))
+                    {
+                        var file = await _bot.GetFile(fileId, ct);
+                        var photoUrl = $"https://api.telegram.org/file/bot{_token}/{file.FilePath}";
+                        resultImageUrl = await _imageService.GenerateFromImageAsync(photoUrl, prompt, ct);
+                    }
+                    // txt2img
+                    else
+                    {
+                        resultImageUrl = await _imageService.GetImageUrlAsync(prompt, "pro", ct);
+                    }
+
+                    // Списываем кредит
+                    if (!string.IsNullOrEmpty(resultImageUrl))
+                    {
+                        currentUser.Credits--;
+                        success = true;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Ошибка генерации");
+                    db.RequestLogs.Add(new RequestLog { UserId = chatId, Timestamp = DateTime.UtcNow, Action = "generate", Success = false });
+                    await db.SaveChangesAsync(ct);
+                }
+                // Лог
+                db.RequestLogs.Add(new RequestLog { UserId = chatId, Timestamp = DateTime.UtcNow, Action = "generate", Success = success });
+                await db.SaveChangesAsync(ct);
+
+                // Удаляем GIF
+                try { await _bot.DeleteMessage(chatId, loadingMsg.MessageId, ct); } catch { }
+
+                // Отправляем результат
+                if (!string.IsNullOrEmpty(resultImageUrl))
+                {
+                    InputFile photo = resultImageUrl.StartsWith("data:image")
+                        ? InputFile.FromStream(StreamFromBase64(resultImageUrl), "result.png")
+                        : InputFile.FromUri(resultImageUrl);
+
+                    var caption = prompt.Length <= 200 ? prompt : "Готово!";
+                    await _bot.SendPhoto(chatId, photo, caption: caption, cancellationToken: ct);
+                }
+                else
+                {
+                    await _bot.SendMessage(chatId, "Не удалось сгенерировать изображение\nПопробуй позже или напиши /buy", cancellationToken: ct);
+                }
             }
 
             // === КНОПКА "Ещё одну!" (CallbackQuery) ===
@@ -359,6 +386,21 @@ public class TelegramBotWorker : BackgroundService
         })
         .WithName("TelegramWebhook")
         .ExcludeFromDescription(); // ←←← ЧТОБЫ SWAGGER НЕ РУГАЛСЯ
+    }
+
+    private async Task<Data.User> GetOrCreateUser(long chatId)
+    {
+        await using var scope = _services.CreateAsyncScope();
+        await using var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+
+        var user = await db.Users.FindAsync(chatId);
+        if (user == null)
+        {
+            user = new Data.User { TelegramId = chatId, Credits = 1 };
+            db.Users.Add(user);
+            await db.SaveChangesAsync();
+        }
+        return user;
     }
 
     private async Task _botPhoto(long chatId, InputFile photo, string caption, CancellationToken ct)

@@ -126,37 +126,39 @@ namespace MultiMessengerAiBot.Services
 
         public async Task<string?> GenerateFromImageAsync(string imageUrl, string prompt, CancellationToken ct = default)
         {
-            var request = new
-            {
-                model = "black-forest-labs/flux.2-pro",           // поддерживает img2img
-                                                                  // model = "ideogram/ideogram-2.0"                // альтернатива, тоже отлично работает
-                messages = new[]
-                {
-            new
-            {
-                role = "user",
-                content = new object[]
-                {
-                    new { type = "text", text = prompt },
-                    new { type = "image_url", image_url = new { url = imageUrl } }
-                }
-            }
-        },
-                max_tokens = 1,
-                modalities = new[] { "image", "text" }
-            };
+        //    var request = new
+        //    {
+        //        model = "black-forest-labs/flux.2-pro",           // поддерживает img2img
+        //                                                          // model = "ideogram/ideogram-2.0"                // альтернатива, тоже отлично работает
+        //        messages = new[]
+        //        {
+        //    new
+        //    {
+        //        role = "user",
+        //        content = new object[]
+        //        {
+        //            new { type = "text", text = prompt },
+        //            new { type = "image_url", image_url = new { url = imageUrl } }
+        //        }
+        //    }
+        //},
+        //        max_tokens = 1,
+        //        modalities = new[] { "image", "text" }
+        //    };
 
-            var content = new StringContent(
-                JsonSerializer.Serialize(request),
-                Encoding.UTF8,
-                "application/json");
+        //    var content = new StringContent(
+        //        JsonSerializer.Serialize(request),
+        //        Encoding.UTF8,
+        //        "application/json");
 
-            var response = await _http.PostAsync("/api/v1/chat/completions", content, ct);
+        //    var response = await _http.PostAsync("/api/v1/chat/completions", content, ct);
 
-            if (!response.IsSuccessStatusCode)
-                return null;
+        //    if (!response.IsSuccessStatusCode)
+        //        return null;
             
-            using var doc = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(ct));
+        //    using var doc = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(ct));
+            using var doc = ReadFile();
+
             var root = doc.RootElement;
 
             // Новый формат 2025 года

@@ -1,0 +1,163 @@
+﻿<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Купить генерации</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--tg-theme-bg-color);
+            color: var(--tg-theme-text-color);
+            margin: 0;
+            padding: 20px;
+            text-align: center;
+        }
+
+        h1 {
+            font-size: 24px;
+            margin-bottom: 10px;
+        }
+
+        p {
+            font-size: 16px;
+            margin-bottom: 30px;
+            color: var(--tg-theme-hint-color);
+        }
+
+        .plan {
+            background: var(--tg-theme-secondary-bg-color);
+            border-radius: 16px;
+            padding: 16px;
+            margin: 12px 0;
+            text-align: left;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+            .plan.selected {
+                border: 2px solid var(--tg-theme-button-color);
+            }
+
+        .price {
+            font-size: 20px;
+            font-weight: bold;
+        }
+
+        .button {
+            background: var(--tg-theme-button-color);
+            color: var(--tg-theme-button-text-color);
+            border: none;
+            padding: 16px;
+            border-radius: 12px;
+            font-size: 18px;
+            width: 100%;
+            margin-top: 30px;
+        }
+
+        .features {
+            font-size: 14px;
+            color: var(--tg-theme-hint-color);
+            margin-top: 30px;
+            text-align: left;
+        }
+
+        .feature {
+            margin: 8px 0;
+        }
+    </style>
+</head>
+<body>
+    <h1>Получи HD качество и расширенные функции</h1>
+    <p>Выбирай количество генераций и подключай тариф</p>
+
+    <div class="plan" onclick="selectPlan('novice')">
+        <div>
+            <div><strong>Новичок</strong></div>
+            <div>5 изображений</div>
+        </div>
+        <div class="price">129 ₽</div>
+    </div>
+
+    <div class="plan selected" onclick="selectPlan('basic')">
+        <div>
+            <div><strong>Базовый</strong></div>
+            <div>10 изображений</div>
+        </div>
+        <div class="price">159 ₽</div>
+    </div>
+
+    <div class="plan" onclick="selectPlan('standard')">
+        <div>
+            <div><strong>Стандарт</strong></div>
+            <div>25 изображений</div>
+        </div>
+        <div class="price">329 ₽</div>
+    </div>
+
+    <div class="plan" onclick="selectPlan('advanced')">
+        <div>
+            <div><strong>Продвинутый</strong></div>
+            <div>50 изображений</div>
+        </div>
+        <div class="price">499 ₽</div>
+    </div>
+
+    <div class="plan" onclick="selectPlan('generator')">
+        <div>
+            <div><strong>Генератор</strong></div>
+            <div>100 изображений</div>
+        </div>
+        <div class="price">799 ₽</div>
+    </div>
+
+    <div class="features">
+        <div class="feature">✓ Замена фона, ретушь, расширение кадра и стилизация</div>
+        <div class="feature">✓ Креативные посты для Insta*, TikTok и других платформ</div>
+        <div class="feature">✓ Уникальные картинки по описанию — быстро и четко</div>
+        <div class="feature">✓ Разовая оплата, без подписок и автоматических списаний</div>
+    </div>
+
+    <button class="button" onclick="buy()">Перейти к оплате</button>
+
+    <script>
+        let selected = 'basic'; // по умолчанию
+
+        function selectPlan(plan) {
+            document.querySelectorAll('.plan').forEach(p => p.classList.remove('selected'));
+            event.currentTarget.classList.add('selected');
+            selected = plan;
+        }
+
+        function buy() {
+            const plans = {
+                novice: { count: 5, price: 129 },
+                basic: { count: 10, price: 159 },
+                standard: { count: 25, price: 329 },
+                advanced: { count: 50, price: 499 },
+                generator: { count: 100, price: 799 }
+            };
+
+            const plan = plans[selected];
+            const userId = Telegram.WebApp.initDataUnsafe.user.id;
+            const label = `pack_${plan.count}_${userId}`;  // ← вот это главное!
+
+            const paymentUrl = `https://yoomoney.ru/quickpay/confirm.xml` +
+                `?receiver=4100119429397428` +  // ← замени на свой
+                `&quickpay-form=shop` +
+                `&targets=Покупка+пакета+${plan.count}+генераций` +
+                `&paymentType=PC` +
+                `&sum=${plan.price}` +
+                `&label=${label}` +
+                `&successURL=https://t.me/@AINanoBananoBot`;  // ← замени на имя своего бота
+
+            Telegram.WebApp.openLink(paymentUrl);
+        }
+
+        Telegram.WebApp.ready();
+        Telegram.WebApp.expand();</script>
+</body>
+</html>
+/<!-- End of file buy.html  4100119429397428 --> 

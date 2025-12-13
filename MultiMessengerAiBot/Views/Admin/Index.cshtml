@@ -1,0 +1,82 @@
+﻿@model IEnumerable<dynamic>
+
+@{
+    ViewData["Title"] = "Админ-панель";
+}
+
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8" />
+    <title>@ViewData["Title"]</title>
+    <style>
+        body { font-family: Arial, sans-serif; background: #f4f4f4; color: #333; padding: 20px; }
+        h1 { color: #2c3e50; }
+        .stats { display: flex; gap: 20px; margin: 20px 0; flex-wrap: wrap; }
+        .stat { background: white; padding: 15px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); min-width: 200px; }
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; background: white; }
+        th, td { padding: 12px; border: 1px solid #ddd; text-align: left; }
+        th { background: #2c3e50; color: white; }
+        tr:nth-child(even) { background: #f9f9f9; }
+        .username { color: #1DA1F2; }
+    </style>
+</head>
+<body>
+    <h1>📊 Аналитика бота</h1>
+
+    <div class="stats">
+        <div class="stat">
+            <strong>Всего пользователей</strong><br />
+            <big>@ViewBag.TotalUsers</big>
+        </div>
+        <div class="stat">
+            <strong>Осталось генераций</strong><br />
+            <big>@ViewBag.TotalCredits</big>
+        </div>
+        <div class="stat">
+            <strong>Успешных платежей</strong><br />
+            <big>@ViewBag.TotalPayments</big>
+        </div>
+        <div class="stat">
+            <strong>Сгенерировано фото</strong><br />
+            <big>@ViewBag.TotalGenerations</big>
+        </div>
+    </div>
+
+    <h2>Пользователи</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Имя</th>
+                <th>Username</th>
+                <th>Телефон</th>
+                <th>Осталось генераций</th>
+                <th>Сгенерировал</th>
+                <th>ID</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var u in Model)
+            {
+                <tr>
+                    <td>@(string.IsNullOrEmpty(u.FullName) ? "—": u.FullName)</td>
+                    <td>
+                        @if (string.IsNullOrEmpty(u.Username))
+                        {
+                            <text>—</text>
+                        }
+                        else
+                        {
+                            <span class="username">@@@u.Username</span>
+                        }
+                    </td>
+                    <td>@(string.IsNullOrEmpty(u.PhoneNumber) ? "—" : u.PhoneNumber)</td>
+                    <td><strong>@u.Credits</strong></td>
+                    <td>@u.GenerationsUsed</td>
+                    <td><small>@u.TelegramId</small></td>
+                </tr>
+            }
+        </tbody>
+    </table>
+</body>
+</html>
