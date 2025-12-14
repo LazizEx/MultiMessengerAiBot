@@ -175,7 +175,7 @@ public class TelegramBotWorker : BackgroundService
                             $"Привет, {user.FirstName ?? "друг"}!\n\n" +
                             $"Чтобы продолжить, поделись номером телефона — это нужно для оплаты и безопасности.\n\n" +
                             $"У тебя {user.Credits} генераций\n\n" +
-                            $"Твоя реферальная ссылка: https://t.me/{(await _bot.GetMe(ct)).Username}?start=ref_{user.ReferralCode}"+
+                            $"Твоя реферальная ссылка: https://t.me/{(await _bot.GetMe(ct)).Username}?start=ref_{user.ReferralCode}\n\n" +
                             $"/buy — купить генерации\n/balance — проверить остаток",
                             replyMarkup: requestPhoneKeyboard,  cancellationToken: ct);
 
