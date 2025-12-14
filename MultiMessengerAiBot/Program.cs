@@ -145,4 +145,14 @@ app.MapPost("/yoomoney/notify", async (HttpRequest request, AppDbContext db, ICo
 
 app.MapGet("/", () => "MultiMessenger AI Bot is running! Nano banana ready.");
 
+var diskPath = "/SQLite/output.json";
+var seedPath = "output.json"; // путь в проекте (файл должен быть в git)
+
+if (!File.Exists(diskPath))
+{
+    Directory.CreateDirectory(Path.GetDirectoryName(diskPath)!);
+    File.Copy(seedPath, diskPath);
+    Console.WriteLine("output.json скопирован на persistent disk");
+}
+
 app.Run();

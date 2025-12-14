@@ -190,51 +190,42 @@ namespace MultiMessengerAiBot.Services
             return null;
         }
 
-        private static JsonDocument ReadFile()
+        private static JsonDocument? ReadFile()
         {
-            var vv = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
-
-            string filePath = vv + "\\output.json";
-            JsonDocument v;
+            // На Render.com используем путь на примонтированном диске
+            // Если переменная окружения не задана — fallback на локальный путь (удобно для разработки)
+            string filePath = Environment.GetEnvironmentVariable("OUTPUT_JSON_PATH") ?? "/SQLite/output.json";
             try
             {
-                // Read the entire content of the JSON file into a string
-                string jsonString = File.ReadAllText(filePath);
-
-                // Parse the JSON string into a JsonDocument
-                return JsonDocument.Parse(jsonString);
-
-                using (JsonDocument document = JsonDocument.Parse(jsonString))
+                if (!File.Exists(filePath))
                 {
-                    v = document;
-                    // Access the root element of the JSON document
-                    //JsonElement root = document.RootElement;
-
-                    // You can now work with the JsonElement to navigate and extract data
-                    // For example, to print the entire JSON:
-                    //Console.WriteLine(root.GetRawText());
-
-                    // Or to access specific properties (assuming 'name' is a property):
-                    //if (root.TryGetProperty("name", out JsonElement nameElement))
-                    //{
-                    //    Console.WriteLine($"Name: {nameElement.GetString()}");
-                    //}
+                    Console.WriteLine($"Ошибка: Файл не найден по пути '{filePath}'");
+                    return null;
                 }
-                return v;
-            }
-            catch (FileNotFoundException)
-            {
-                Console.WriteLine($"Error: The file '{filePath}' was not found.");
+
+                string jsonString = File.ReadAllText(filePath);
+                return JsonDocument.Parse(jsonString);
             }
             catch (JsonException ex)
             {
-                Console.WriteLine($"Error parsing JSON: {ex.Message}");
+                Console.WriteLine($"Ошибка парсинга JSON: {ex.Message}");
+                return null;
+            }
+            catch (UnauthorizedAccessException ex)
+            {
+                Console.WriteLine($"Ошибка доступа к файлу: {ex.Message}");
+                return null;
+            }
+            catch (IOException ex)
+            {
+                Console.WriteLine($"Ошибка ввода-вывода при чтении файла: {ex.Message}");
+                return null;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"An unexpected error occurred: {ex.Message}");
+                Console.WriteLine($"Неожиданная ошибка: {ex.Message}");
+                return null;
             }
-            return null;
         }
     }
 }
