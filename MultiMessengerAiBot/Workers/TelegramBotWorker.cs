@@ -134,8 +134,9 @@ public class TelegramBotWorker : BackgroundService
                     }
 
                     // ОБРАБАТЫВАЕМ РЕФЕРАЛКУ СНАЧАЛА
+                    bool isNewReferral = false;
                     long? referrerId = null;
-                    if (prompt.StartsWith("/start ref_"))
+                    if (prompt.StartsWith("/start ref_") && user.ReferredBy == null)
                     {
                         var refCode = prompt["/start ref_".Length..].Trim();
                         var referrer = await db.Users.FirstOrDefaultAsync(u => u.ReferralCode == refCode, ct);
@@ -144,9 +145,11 @@ public class TelegramBotWorker : BackgroundService
                             referrerId = referrer.TelegramId;
                             user.ReferredBy = referrerId;
 
-                            // Даём бонусы сразу
+                            // Начисляем бонусы ТОЛЬКО при новом приглашении
                             user.Credits += 2;
                             referrer.Credits += 2;
+                            isNewReferral = true;
+                            await db.SaveChangesAsync(ct); // Сохраняем сразу, чтобы избежать гонок
                         }
                     }
 
@@ -154,10 +157,11 @@ public class TelegramBotWorker : BackgroundService
                     if (string.IsNullOrEmpty(user.ReferralCode))
                     {
                         user.ReferralCode = Guid.NewGuid().ToString("N")[..8].ToUpper();
+                        await db.SaveChangesAsync(ct);
                     }
 
                     // Сохраняем ВСЁ ОДНИМ SaveChanges (важно!)
-                    await db.SaveChangesAsync(ct);
+                    //await db.SaveChangesAsync(ct);
 
                     // === ЕСЛИ ТЕЛЕФОН ЕЩЁ НЕТ — ЗАПРАШИВАЕМ ===
                     if (string.IsNullOrEmpty(user.PhoneNumber))
@@ -171,34 +175,78 @@ public class TelegramBotWorker : BackgroundService
                             OneTimeKeyboard = true
                         };
 
-                        await _bot.SendMessage(chatId,
-                            $"Привет, {user.FirstName ?? "друг"}!\n\n" +
-                            $"Чтобы продолжить, поделись номером телефона — это нужно для оплаты и безопасности.\n\n" +
-                            $"У тебя {user.Credits} генераций\n\n" +
-                            $"Твоя реферальная ссылка: https://t.me/{(await _bot.GetMe(ct)).Username}?start=ref_{user.ReferralCode}\n\n" +
-                            $"/buy — купить генерации\n/balance — проверить остаток",
-                            replyMarkup: requestPhoneKeyboard,  cancellationToken: ct);
+                        //await _bot.SendMessage(chatId,
+                        //    $"Привет, {user.FirstName ?? "друг"}!\n\n" +
+                        //    $"Чтобы продолжить, поделись номером телефона — это нужно для оплаты и безопасности.\n\n" +
+                        //    $"У тебя {user.Credits} генераций\n\n" +
+                        //    $"Твоя реферальная ссылка: https://t.me/{(await _bot.GetMe(ct)).Username}?start=ref_{user.ReferralCode}\n\n" +
+                        //    $"/buy — купить генерации\n/balance — проверить остаток",
+                        //    replyMarkup: requestPhoneKeyboard,  cancellationToken: ct);
+                        var welcomeText = new StringBuilder();
+                        welcomeText.AppendLine($"Привет, {user.FirstName ?? "друг"}!");
+                        welcomeText.AppendLine();
+                        welcomeText.AppendLine($"У тебя {user.Credits} генераций");
 
+                        if (isNewReferral)
+                        {
+                            welcomeText.AppendLine("🎉 Вы зарегистрированы по реферальной ссылке!");
+                            welcomeText.AppendLine("Вы и ваш друг получили +2 генерации!");
+                            welcomeText.AppendLine();
+                        }
+
+                        welcomeText.AppendLine($"Твоя реферальная ссылка:");
+                        welcomeText.AppendLine($"https://t.me/{(await _bot.GetMe(ct)).Username}?start=ref_{user.ReferralCode}");
+                        welcomeText.AppendLine();
+                        welcomeText.AppendLine("/buy — купить генерации");
+                        welcomeText.AppendLine("/balance — проверить остаток");
+
+                        await _bot.SendMessage(chatId, welcomeText.ToString(), replyMarkup: requestPhoneKeyboard, cancellationToken: ct);
                         return Results.Ok();
                     }
 
-                    // Уведомляем реферера
-                    if (referrerId.HasValue)
+                    // Уведомляем реферера ТОЛЬКО если это новый реферал
+                    if (isNewReferral && referrerId.HasValue)
                     {
-                        await _bot.SendMessage(referrerId.Value, "По твоей реферальной ссылке пришёл новый пользователь! +2 кредита", cancellationToken: ct);
+                        try
+                        {
+                            await _bot.SendMessage(referrerId.Value,
+                                "🎉 По твоей реферальной ссылке пришёл новый пользователь!\nВы оба получили +2 генерации!",
+                                cancellationToken: ct);
+                        }
+                        catch
+                        {
+                            // Если реферер заблокировал бота — игнорируем
+                        }
                     }
 
+                    //var botName = (await _bot.GetMe(ct)).Username;
+                    //var refLink = $"https://t.me/{botName}?start=ref_{user.ReferralCode}";
+
+                    //await _bot.SendMessage(chatId,
+                    //    $"С возвращением, {user.FirstName ?? "друг"}!\n\n" +
+                    //    $"У тебя {user.Credits} генераций\n\n" +
+                    //    $"Реферальная ссылка:\n{refLink}\nПригласи друга — оба получите +2 кредита!\n\n" +
+                    //    $"/buy — купить генерации\n/balance — проверить остаток",
+                    //    cancellationToken: ct);
+
+                    //// Убираем клавиатуру после первого сообщения
+                    //await _bot.SendMessage(chatId, ".", replyMarkup: new ReplyKeyboardRemove(), cancellationToken: ct);
+                    //return Results.Ok();
+                    
+                    // Обычное приветствие для вернувшихся
                     var botName = (await _bot.GetMe(ct)).Username;
                     var refLink = $"https://t.me/{botName}?start=ref_{user.ReferralCode}";
 
                     await _bot.SendMessage(chatId,
                         $"С возвращением, {user.FirstName ?? "друг"}!\n\n" +
                         $"У тебя {user.Credits} генераций\n\n" +
-                        $"Реферальная ссылка:\n{refLink}\nПригласи друга — оба получите +2 кредита!\n\n" +
+                        (isNewReferral ? "🎉 Спасибо за регистрацию по приглашению!\n\n" : "") +
+                        $"Твоя реферальная ссылка:\n{refLink}\n" +
+                        $"Пригласи друга — оба получите +2 кредита!\n\n" +
                         $"/buy — купить генерации\n/balance — проверить остаток",
                         cancellationToken: ct);
 
-                    // Убираем клавиатуру после первого сообщения
+                    // Убираем клавиатуру
                     await _bot.SendMessage(chatId, ".", replyMarkup: new ReplyKeyboardRemove(), cancellationToken: ct);
                     return Results.Ok();
                 }

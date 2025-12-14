@@ -12,6 +12,7 @@ namespace MultiMessengerAiBot.Data
 
         public DbSet<User> Users { get; set; }
         public DbSet<RequestLog> RequestLogs { get; set; } // для аналитики
+        public DbSet<Referral> Referrals { get; set; }
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
@@ -51,5 +52,15 @@ namespace MultiMessengerAiBot.Data
         public DateTime Timestamp { get; set; }
         public string Action { get; set; } = string.Empty; // "generate", "payment", "abuse"
         public bool Success { get; set; }
+    }
+
+    public class Referral
+    {
+        public int Id { get; set; }
+        public long ReferrerUserId { get; set; }  // ID того, кто пригласил
+        public long InvitedUserId { get; set; }   // ID того, кто пришёл
+        public DateTime InvitedAt { get; set; } = DateTime.UtcNow;
+
+        // Опционально: можно добавить уникальный индекс на (ReferrerUserId, InvitedUserId)
     }
 }

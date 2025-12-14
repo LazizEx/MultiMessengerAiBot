@@ -12,8 +12,17 @@ var builder = WebApplication.CreateBuilder(args);
 Batteries.Init();
 
 // База данных
-var dbPath = Environment.GetEnvironmentVariable("DB_PATH") ?? "/SQLite/bot.db";  // fallback на локальный для dev
+//var dbPath = Environment.GetEnvironmentVariable("DB_PATH") ?? "/SQLite/bot.db";  // fallback на локальный для dev
+//builder.Services.AddDbContext<AppDbContext>(options => options.UseSqlite($"Data Source={dbPath};"));
+
+var environment = builder.Environment;
+
+var dbPath = environment.IsDevelopment()
+    ? builder.Configuration["Database:Path"]  // берёт из appsettings.Development.json
+    : Environment.GetEnvironmentVariable("DB_PATH") ?? "/data/bot.db";  // на Render
+
 builder.Services.AddDbContext<AppDbContext>(options => options.UseSqlite($"Data Source={dbPath};"));
+
 
 // Конфигурация
 builder.Configuration
