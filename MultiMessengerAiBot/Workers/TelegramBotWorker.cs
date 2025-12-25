@@ -12,6 +12,7 @@ using Telegram.Bot;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
 using Telegram.Bot.Types.ReplyMarkups;
+using VkNet.Model;
 //using Telegram.Bot.Types.InputFiles;
 
 namespace MultiMessengerAiBot.Workers;
@@ -50,10 +51,19 @@ public class TelegramBotWorker : BackgroundService
 
         try
         {
+            await _bot.DeleteWebhook(dropPendingUpdates: true, ct);
+            
             var info = await _bot.GetWebhookInfo(ct);
             if (info.Url != webhookUrl)
             {
-                await _bot.SetWebhook(url: webhookUrl, allowedUpdates: new[] { UpdateType.Message }, cancellationToken: ct);
+                await _bot.SetWebhook(
+                    url: webhookUrl, 
+                    allowedUpdates: new[] 
+                    { 
+                        Telegram.Bot.Types.Enums.UpdateType.Message,
+                        Telegram.Bot.Types.Enums.UpdateType.CallbackQuery,
+                    }, 
+                    cancellationToken: ct);
 
                 _logger.LogInformation("Webhook установлен: {Url}", webhookUrl);
             }
@@ -92,7 +102,7 @@ public class TelegramBotWorker : BackgroundService
                 {
                     var user = await db.Users.FindAsync(chatId) ?? new Data.User { TelegramId = chatId };
                     user.PhoneNumber = contact.PhoneNumber;
-                    user.Currency = contact.PhoneNumber.StartsWith("+998") ? "UZS" : "RUB";
+                    user.Currency = (contact.PhoneNumber.StartsWith("+998") || contact.PhoneNumber.StartsWith("998")) ? "UZS" : "RUB";
                     if (user.TelegramId == 0) db.Users.Add(user);
                     await db.SaveChangesAsync(ct);
                     await _bot.SendMessage(chatId, $"Регион определён: {user.Currency}", cancellationToken: ct);
@@ -247,7 +257,7 @@ public class TelegramBotWorker : BackgroundService
                         cancellationToken: ct);
 
                     // Убираем клавиатуру
-                    await _bot.SendMessage(chatId, ".", replyMarkup: new ReplyKeyboardRemove(), cancellationToken: ct);
+                    //await _bot.SendMessage(chatId, ".", replyMarkup: new ReplyKeyboardRemove(), cancellationToken: ct);
                     return Results.Ok();
                 }
 
@@ -307,6 +317,11 @@ public class TelegramBotWorker : BackgroundService
                         $"У тебя {user.Credits} генераций\n\nВыбери способ оплаты:",
                         replyMarkup: keyboard, cancellationToken: ct);
 
+                    return Results.Ok();
+                }
+
+                if (prompt.StartsWith("/"))
+                {
                     return Results.Ok();
                 }
 
@@ -389,8 +404,13 @@ public class TelegramBotWorker : BackgroundService
                         ? InputFile.FromStream(StreamFromBase64(resultImageUrl), "result.png")
                         : InputFile.FromUri(resultImageUrl);
 
+                    //var model = prompt.StartsWith("/pro ") ? "pro" : prompt.StartsWith("/flex ") ? "flex" : "pro";
+                    //var cleanPrompt = prompt.Replace("/pro ", "").Replace("/flex ", "").Trim();
+
+                    var keyboard = new InlineKeyboardMarkup(InlineKeyboardButton.WithCallbackData("Ещё одну!", $"again:fdsfsd"));
+
                     var caption = prompt.Length <= 200 ? prompt : "Готово!";
-                    await _bot.SendPhoto(chatId, photo, caption: caption, cancellationToken: ct);
+                    await _bot.SendPhoto(chatId, photo, caption: caption, replyMarkup: keyboard, cancellationToken: ct);
                 }
                 else
                 {
