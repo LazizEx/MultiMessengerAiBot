@@ -4,6 +4,7 @@ using MultiMessengerAiBot.Services;
 using MultiMessengerAiBot.Workers;
 using SQLitePCL;
 using System.Text;
+using System.Text.Json;
 using Telegram.Bot;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -43,6 +44,9 @@ builder.Services.AddSingleton<IBotService, OpenRouterImageService>();
 
 builder.Services.AddSingleton<TelegramBotClient>(sp =>
     new TelegramBotClient(builder.Configuration["BotTokens:Telegram"]!));
+
+//builder.Services.AddHostedService<DonatePaySocketService>();
+//builder.Services.AddHostedService<DonatePayPollingService>();
 
 // КЛЮЧЕВАЯ СТРОКА — запускает BackgroundService и ExecuteAsync()
 builder.Services.AddHostedService<TelegramBotWorker>();
@@ -142,6 +146,9 @@ app.MapPost("/yoomoney/notify", async (HttpRequest request, AppDbContext db, ICo
 
     return Results.Ok("ok");
 }).WithName("YooMoneyNotify");
+
+// donatepay.ru webhook
+
 
 app.MapGet("/", () => "MultiMessenger AI Bot is running! Nano banana ready.");
 

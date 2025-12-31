@@ -62,6 +62,7 @@ public class TelegramBotWorker : BackgroundService
                     { 
                         Telegram.Bot.Types.Enums.UpdateType.Message,
                         Telegram.Bot.Types.Enums.UpdateType.CallbackQuery,
+                        Telegram.Bot.Types.Enums.UpdateType.InlineQuery,
                     }, 
                     cancellationToken: ct);
 
@@ -307,10 +308,14 @@ public class TelegramBotWorker : BackgroundService
                         await db.SaveChangesAsync(ct);
                     }
 
+                    // Формируем ссылку на DonatePay с передачей Telegram ID в параметре custom
+                    var donatePayUrl = $"https://donatepay.ru/don/1450922?custom={chatId}";
+
                     var keyboard = new InlineKeyboardMarkup(new[]
                     {
                     InlineKeyboardButton.WithWebApp("💳 Докупить генерации", new WebAppInfo() { Url = $"{_hostUrl}/buy.html" }),
                     // Вторую кнопку добавим позже
+                    //InlineKeyboardButton.WithUrl("💰 Поддержать бота любой суммой", donatePayUrl),
                     });
 
                     await _bot.SendMessage(chatId,
@@ -369,12 +374,12 @@ public class TelegramBotWorker : BackgroundService
                     {
                         var file = await _bot.GetFile(fileId, ct);
                         var photoUrl = $"https://api.telegram.org/file/bot{_token}/{file.FilePath}";
-                        resultImageUrl = await _imageService.GenerateFromImageAsync(photoUrl, prompt, ct);
+                        resultImageUrl = await _imageService.GenerateFromImageAsync(photoUrl, prompt, "Nano_Banana", ct);
                     }
                     // txt2img
                     else
                     {
-                        resultImageUrl = await _imageService.GetImageUrlAsync(prompt, "pro", ct);
+                        resultImageUrl = await _imageService.GetImageUrlAsync(prompt, "Nano_Banana", ct);
                     }
 
                     // Списываем кредит
@@ -407,10 +412,15 @@ public class TelegramBotWorker : BackgroundService
                     //var model = prompt.StartsWith("/pro ") ? "pro" : prompt.StartsWith("/flex ") ? "flex" : "pro";
                     //var cleanPrompt = prompt.Replace("/pro ", "").Replace("/flex ", "").Trim();
 
-                    var keyboard = new InlineKeyboardMarkup(InlineKeyboardButton.WithCallbackData("Ещё одну!", $"again:fdsfsd"));
+                    //var keyboard = new InlineKeyboardMarkup(InlineKeyboardButton.WithCallbackData("Ещё одну!", $"again:fdsfsd"));
 
                     var caption = prompt.Length <= 200 ? prompt : "Готово!";
-                    await _bot.SendPhoto(chatId, photo, caption: caption, replyMarkup: keyboard, cancellationToken: ct);
+                    await _bot.SendPhoto(
+                        chatId, 
+                        photo, 
+                        caption: caption, 
+                        //replyMarkup: keyboard,
+                        cancellationToken: ct);
                 }
                 else
                 {

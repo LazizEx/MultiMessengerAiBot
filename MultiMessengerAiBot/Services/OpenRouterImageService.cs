@@ -19,8 +19,9 @@ namespace MultiMessengerAiBot.Services
 
         private static readonly Dictionary<string, string> Models = new()
         {
-            ["pro"] = "black-forest-labs/flux.2-pro",
-            ["flex"] = "black-forest-labs/flux.2-flex"
+            ["pro"] =  "black-forest-labs/flux.2-pro",
+            ["flex"] = "black-forest-labs/flux.2-flex",
+            ["Nano_Banana"] = "google/gemini-2.5-flash-image" //Google: Gemini 2.5 Flash Image (Nano Banana)
         };
 
 
@@ -31,9 +32,9 @@ namespace MultiMessengerAiBot.Services
             _logger = logger;
         }
 
-        public async Task<string?> GetImageUrlAsync(string prompt, string model = "pro", CancellationToken ct = default)
+        public async Task<string?> GetImageUrlAsync(string prompt, string model = "Nano_Banana", CancellationToken ct = default)
         {
-            var modelId = Models.GetValueOrDefault(model, Models["pro"]);
+            var modelId = Models.GetValueOrDefault(model, Models["Nano_Banana"]);
 
             var request = new
             {
@@ -44,6 +45,8 @@ namespace MultiMessengerAiBot.Services
                 },
                 // Эти параметры критичны для получения base64-изображения:
                 modalities = new[] { "image", "text" },  // ← ВОЛШЕБСТВО: включает image output
+                aspect_ratio = "16:9", // "1:1","2:3","3:2","3:4","4:3","4:5","5:4","9:16","16:9","21:9"
+                resolution = "2K",     // "1K", "2K", "4K"
                 max_tokens = 1,
                 temperature = 0.8,
                 response_format = "url", // или "b64_json" — если хочешь base64
@@ -67,17 +70,17 @@ namespace MultiMessengerAiBot.Services
 
             try
             {
-                //var response = await _http.PostAsync("/api/v1/chat/completions", content, ct);
+                var response = await _http.PostAsync("/api/v1/chat/completions", content, ct);
 
-                //if (!response.IsSuccessStatusCode)
-                //{
-                //    var error = await response.Content.ReadAsStringAsync(ct);
-                //    _logger.LogWarning("OpenRouter error {Status}: {Error}", response.StatusCode, error);
-                //    return null;
-                //}
+                if (!response.IsSuccessStatusCode)
+                {
+                    var error = await response.Content.ReadAsStringAsync(ct);
+                    _logger.LogWarning("OpenRouter error {Status}: {Error}", response.StatusCode, error);
+                    return null;
+                }
 
-                //using var doc = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(ct), cancellationToken: ct);
-                using var doc = ReadFile();
+                using var doc = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(ct), cancellationToken: ct);
+                //using var doc = ReadFile();
 
                 var root = doc.RootElement;
 
@@ -124,41 +127,42 @@ namespace MultiMessengerAiBot.Services
             }
         }
 
-        public async Task<string?> GenerateFromImageAsync(string imageUrl, string prompt, CancellationToken ct = default)
+        public async Task<string?> GenerateFromImageAsync(string imageUrl, string prompt, string model = "Nano_Banana", CancellationToken ct = default)
         {
-        //    var request = new
-        //    {
-        //        model = "black-forest-labs/flux.2-pro",           // поддерживает img2img
-        //                                                          // model = "ideogram/ideogram-2.0"                // альтернатива, тоже отлично работает
-        //        messages = new[]
-        //        {
-        //    new
-        //    {
-        //        role = "user",
-        //        content = new object[]
-        //        {
-        //            new { type = "text", text = prompt },
-        //            new { type = "image_url", image_url = new { url = imageUrl } }
-        //        }
-        //    }
-        //},
-        //        max_tokens = 1,
-        //        modalities = new[] { "image", "text" }
-        //    };
+            var modelId = Models.GetValueOrDefault(model, Models["Nano_Banana"]);
+            var request = new
+            {
+                model = modelId, //"black-forest-labs/flux.2-pro",           // поддерживает img2img
+                                                                             // model = "ideogram/ideogram-2.0"                // альтернатива, тоже отлично работает
+                messages = new[]
+                {
+                new
+                {
+                    role = "user",
+                    content = new object[]
+                    {
+                        new { type = "text", text = prompt },
+                        new { type = "image_url", image_url = new { url = imageUrl } }
+                    }
+                }
+            },
+                max_tokens = 1,
+                modalities = new[] { "image", "text" }
+            };
 
-        //    var content = new StringContent(
-        //        JsonSerializer.Serialize(request),
-        //        Encoding.UTF8,
-        //        "application/json");
+            var content = new StringContent(
+                JsonSerializer.Serialize(request),
+                Encoding.UTF8,
+                "application/json");
 
-        //    var response = await _http.PostAsync("/api/v1/chat/completions", content, ct);
+            var response = await _http.PostAsync("/api/v1/chat/completions", content, ct);
 
-        //    if (!response.IsSuccessStatusCode)
-        //        return null;
+            if (!response.IsSuccessStatusCode)
+                return null;
+
+            using var doc = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(ct));
+            ///using var doc = ReadFile();
             
-        //    using var doc = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(ct));
-            using var doc = ReadFile();
-
             var root = doc.RootElement;
 
             // Новый формат 2025 года
